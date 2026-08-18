@@ -1,0 +1,142 @@
+# Continuous integration.
+#
+# This module has no cmd/, no database, no OpenAPI contract and no deployment
+# image, so its CI is a subset of moribox's own ci.yml: the checks that apply
+# to a library are build, gofmt, vet, lint and test. See that workflow for the
+# conventions this one follows.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26.6"
+  # Derived from GO_VERSION, not pinned again. See moribox's ci.yml for why.
+  GOTOOLCHAIN: go1.26.6
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Verify the module graph is tidy
+        run: go mod tidy -diff
+
+      - name: Build
+        run: go build ./...
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - run: go vet ./...
+
+      # Installed from source rather than taken from the action, for the same
+      # reason as moribox's ci.yml: the action's prebuilt binary refuses to run
+      # against a newer Go than it was built with.
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
+
+      - name: Lint
+        run: golangci-lint run --timeout=10m
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Test with coverage
+        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 7
+
+  security:
+    name: security scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Known vulnerabilities in dependencies
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  # A single required check, so the branch protection rule does not need
+  # updating every time a job is added.
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    needs:
+      - build
+      - lint
+      - test
+      - security
+    if: always()
+    steps:
+      - name: Verify every job succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          results="$RESULTS"
+          echo "$results"
+          if echo "$results" | grep -q '"result": *"failure"'; then
+            exit 1
+          fi
+          if echo "$results" | grep -q '"result": *"cancelled"'; then
+            exit 1
+          fi

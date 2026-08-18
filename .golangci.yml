@@ -1,0 +1,65 @@
+# Lint configuration.
+#
+# The enabled set is deliberately narrow and high signal: correctness checks,
+# error handling and the security scanner. Style rules that would generate noise
+# without catching defects are left off.
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose
+    - contextcheck
+    - errorlint
+    - gosec
+    - noctx
+    - rowserrcheck
+    - sqlclosecheck
+    - misspell
+    - nilerr
+    - unconvert
+    - wastedassign
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    exclude-functions:
+      - (net/http.ResponseWriter).Write
+  govet:
+    enable-all: true
+    disable:
+      - fieldalignment
+      - shadow
+  gosec:
+    excludes:
+      # G404 is about math/rand. Every security relevant draw in this codebase
+      # uses crypto/rand; math/rand/v2 appears only for jitter and shard choice.
+      - G404
+  staticcheck:
+    checks: ["all"]
+  misspell:
+    # British prose, American identifiers — and misspell cannot express both.
+    #
+    # This module's comments are written in British English ("behaviour",
+    # "serialised", "authorise", "licence"), carried over from moribox, the
+    # application this module was extracted from. The locale follows the
+    # prose rather than the US default, which would otherwise ask to rewrite
+    # it throughout.
+    locale: UK
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
