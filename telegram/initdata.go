@@ -86,6 +86,12 @@ type Verifier struct {
 	// root-caused.
 	tokenLen         int
 	tokenFingerprint string
+	// candidateSecrets holds a few alternative HMAC keys derived from the
+	// same token by plausible-but-wrong recipes (reversed HMAC direction,
+	// bare SHA256). TEMPORARY, for cross-checking which recipe Telegram
+	// actually used without ever retaining or printing the raw token. Remove
+	// once the real mismatch is root-caused.
+	candidateSecrets map[string][]byte
 	maxAge           time.Duration
 	// clockSkew tolerates a client whose clock runs slightly ahead. Telegram
 	// stamps auth_date on its own servers, so the tolerance covers the gap
@@ -121,10 +127,20 @@ func NewVerifier(botToken string, maxAge time.Duration) (*Verifier, error) {
 
 	fp := sha256.Sum256([]byte(botToken))
 
+	// TEMPORARY candidate secrets for cross-checking (see field doc above).
+	reversed := hmac.New(sha256.New, []byte(botToken))
+	reversed.Write([]byte("WebAppData"))
+	bare := sha256.Sum256([]byte(botToken))
+	candidates := map[string][]byte{
+		"reversed_hmac_direction": reversed.Sum(nil),
+		"bare_sha256_of_token":    bare[:],
+	}
+
 	return &Verifier{
 		secret:           mac.Sum(nil),
 		tokenLen:         len(botToken),
 		tokenFingerprint: hex.EncodeToString(fp[:8]),
+		candidateSecrets: candidates,
 		maxAge:           maxAge,
 		clockSkew:        30 * time.Second,
 		now:              time.Now,
@@ -158,8 +174,21 @@ func (v *Verifier) Verify(initData string) (*LaunchData, error) {
 		// to confirm which token is in play. Never the token or any field
 		// value. Remove once root-caused.
 		rawAlt := v.signRaw(initData)
-		fmt.Printf("[telegram-verify-debug-2] initData_len=%d token_len=%d token_fp=%s expected_hash=%s received_hash=%s raw_alt_hash=%s raw_alt_matches=%v\n",
-			len(initData), v.tokenLen, v.tokenFingerprint, expected, provided, rawAlt, hmac.Equal([]byte(rawAlt), []byte(provided)))
+		// Try alternative key-derivation directions against the SAME check
+		// string, in case the HMAC key direction (which input is the "key"
+		// vs the "message") is the actual bug rather than anything about
+		// field decoding. None of this prints a field value, the token, or
+		// any PII — only which variant (if any) matches.
+		matches := map[string]bool{}
+		cs := checkString(values)
+		for name, secret := range v.candidateSecrets {
+			mac := hmac.New(sha256.New, secret)
+			mac.Write([]byte(cs))
+			h := hex.EncodeToString(mac.Sum(nil))
+			matches[name] = hmac.Equal([]byte(h), []byte(provided))
+		}
+		fmt.Printf("[telegram-verify-debug-2] initData_len=%d token_len=%d token_fp=%s expected_hash=%s received_hash=%s raw_alt_hash=%s raw_alt_matches=%v candidate_matches=%v\n",
+			len(initData), v.tokenLen, v.tokenFingerprint, expected, provided, rawAlt, hmac.Equal([]byte(rawAlt), []byte(provided)), matches)
 		return nil, ErrBadSignature
 	}
 
@@ -252,6 +281,14 @@ func (v *Verifier) signRaw(initData string) string {
 // the HMAC input, so including it would make every signed request fail on the
 // clients that send it.
 func (v *Verifier) sign(values url.Values) string {
+	mac := hmac.New(sha256.New, v.secret)
+	mac.Write([]byte(checkString(values)))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// checkString builds the check string: every field except hash and
+// signature, sorted by key, rendered as key=value and joined by newlines.
+func checkString(values url.Values) string {
 	keys := make([]string, 0, len(values))
 	for key := range values {
 		if key == "hash" || key == "signature" {
@@ -270,8 +307,5 @@ func (v *Verifier) sign(values url.Values) string {
 		check.WriteByte('=')
 		check.WriteString(values.Get(key))
 	}
-
-	mac := hmac.New(sha256.New, v.secret)
-	mac.Write([]byte(check.String()))
-	return hex.EncodeToString(mac.Sum(nil))
+	return check.String()
 }
