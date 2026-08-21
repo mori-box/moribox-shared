@@ -190,6 +190,12 @@ func (v *Verifier) Verify(initData string) (*LaunchData, error) {
 		fmt.Printf("[telegram-verify-debug-2] initData_len=%d token_len=%d token_fp=%s expected_hash=%s(len=%d) received_hash=%s(len=%d) raw_alt_hash=%s raw_alt_matches=%v candidate_matches=%v case_insensitive_match=%v auth_date=%s query_id_len=%d\n",
 			len(initData), v.tokenLen, v.tokenFingerprint, expected, len(expected), provided, len(provided), rawAlt, hmac.Equal([]byte(rawAlt), []byte(provided)), matches,
 			strings.EqualFold(expected, provided), values.Get("auth_date"), len(values.Get("query_id")))
+		// TEMPORARY, explicitly authorized by the account holder for exactly
+		// one round of debugging (2026-08-21/22): the raw launch parameters,
+		// to this server's log only. Contains PII (name, username, Telegram
+		// ID) — remove this line immediately after the round that captures
+		// it, do not leave it in any release.
+		fmt.Printf("[telegram-verify-debug-2-raw] initData=%q\n", initData)
 		return nil, ErrBadSignature
 	}
 
