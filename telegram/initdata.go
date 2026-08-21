@@ -141,8 +141,12 @@ func (v *Verifier) Verify(initData string) (*LaunchData, error) {
 			keys = append(keys, fmt.Sprintf("%s(%d)", k, len(values.Get(k))))
 		}
 		sort.Strings(keys)
-		fmt.Printf("[telegram-verify-debug] initData_len=%d fields=%v expected_hash=%s received_hash=%s\n",
-			len(initData), keys, expected, provided)
+		// Also try signing over the RAW (still percent-encoded) field values,
+		// split by hand instead of through url.ParseQuery, to tell apart a
+		// decoding mismatch from a genuinely wrong secret.
+		rawAlt := v.signRaw(initData)
+		fmt.Printf("[telegram-verify-debug] initData_len=%d fields=%v expected_hash=%s received_hash=%s raw_alt_hash=%s raw_alt_matches=%v\n",
+			len(initData), keys, expected, provided, rawAlt, hmac.Equal([]byte(rawAlt), []byte(provided)))
 		return nil, ErrBadSignature
 	}
 
@@ -187,6 +191,46 @@ func (v *Verifier) Verify(initData string) (*LaunchData, error) {
 		data.ChatID, _ = strconv.ParseInt(raw, 10, 64)
 	}
 	return data, nil
+}
+
+// signRaw is a TEMPORARY diagnostic twin of sign that skips url.ParseQuery
+// decoding, splitting the raw initData string by hand and signing the still
+// percent-encoded values. If this matches when sign does not, the bug is in
+// how values get decoded, not in the token or the algorithm. Remove once the
+// real mismatch is root-caused.
+func (v *Verifier) signRaw(initData string) string {
+	pairs := strings.Split(initData, "&")
+	kv := make(map[string]string, len(pairs))
+	keys := make([]string, 0, len(pairs))
+	for _, p := range pairs {
+		parts := strings.SplitN(p, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := parts[0]
+		if key == "hash" || key == "signature" {
+			continue
+		}
+		if _, exists := kv[key]; !exists {
+			keys = append(keys, key)
+		}
+		kv[key] = parts[1]
+	}
+	sort.Strings(keys)
+
+	var check strings.Builder
+	for i, key := range keys {
+		if i > 0 {
+			check.WriteByte('\n')
+		}
+		check.WriteString(key)
+		check.WriteByte('=')
+		check.WriteString(kv[key])
+	}
+
+	mac := hmac.New(sha256.New, v.secret)
+	mac.Write([]byte(check.String()))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // sign computes the hash Telegram would have produced for these values.
