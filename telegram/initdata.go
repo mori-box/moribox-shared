@@ -79,7 +79,14 @@ type Verifier struct {
 	// itself is not retained: nothing here needs it again, and not holding it
 	// means it cannot be read out of this struct.
 	secret []byte
-	maxAge time.Duration
+	// tokenLen and tokenFingerprint are TEMPORARY diagnostic fields — never
+	// the token itself, just its length and a one-way SHA256 fingerprint, so
+	// two verifiers can be compared for using the identical token without
+	// either ever printing anything secret. Remove once the real mismatch is
+	// root-caused.
+	tokenLen         int
+	tokenFingerprint string
+	maxAge           time.Duration
 	// clockSkew tolerates a client whose clock runs slightly ahead. Telegram
 	// stamps auth_date on its own servers, so the tolerance covers the gap
 	// between their clock and ours, not a user's.
@@ -112,11 +119,15 @@ func NewVerifier(botToken string, maxAge time.Duration) (*Verifier, error) {
 	mac := hmac.New(sha256.New, []byte("WebAppData"))
 	mac.Write([]byte(botToken))
 
+	fp := sha256.Sum256([]byte(botToken))
+
 	return &Verifier{
-		secret:    mac.Sum(nil),
-		maxAge:    maxAge,
-		clockSkew: 30 * time.Second,
-		now:       time.Now,
+		secret:           mac.Sum(nil),
+		tokenLen:         len(botToken),
+		tokenFingerprint: hex.EncodeToString(fp[:8]),
+		maxAge:           maxAge,
+		clockSkew:        30 * time.Second,
+		now:              time.Now,
 	}, nil
 }
 
@@ -141,6 +152,14 @@ func (v *Verifier) Verify(initData string) (*LaunchData, error) {
 	// A byte-by-byte comparison would leak, through its timing, how much of a
 	// forged hash was correct — which is enough to construct the rest.
 	if !hmac.Equal([]byte(expected), []byte(provided)) {
+		// TEMPORARY diagnostic (2026-08-21, round 2): the TrimSpace fix did
+		// not resolve the real failures, so logging again — this time also
+		// the token length/fingerprint the secret was actually derived from,
+		// to confirm which token is in play. Never the token or any field
+		// value. Remove once root-caused.
+		rawAlt := v.signRaw(initData)
+		fmt.Printf("[telegram-verify-debug-2] initData_len=%d token_len=%d token_fp=%s expected_hash=%s received_hash=%s raw_alt_hash=%s raw_alt_matches=%v\n",
+			len(initData), v.tokenLen, v.tokenFingerprint, expected, provided, rawAlt, hmac.Equal([]byte(rawAlt), []byte(provided)))
 		return nil, ErrBadSignature
 	}
 
@@ -185,6 +204,44 @@ func (v *Verifier) Verify(initData string) (*LaunchData, error) {
 		data.ChatID, _ = strconv.ParseInt(raw, 10, 64)
 	}
 	return data, nil
+}
+
+// signRaw is a TEMPORARY diagnostic twin of sign that skips url.ParseQuery
+// decoding, splitting the raw initData string by hand and signing the still
+// percent-encoded values. Remove once the real mismatch is root-caused.
+func (v *Verifier) signRaw(initData string) string {
+	pairs := strings.Split(initData, "&")
+	kv := make(map[string]string, len(pairs))
+	keys := make([]string, 0, len(pairs))
+	for _, p := range pairs {
+		parts := strings.SplitN(p, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := parts[0]
+		if key == "hash" || key == "signature" {
+			continue
+		}
+		if _, exists := kv[key]; !exists {
+			keys = append(keys, key)
+		}
+		kv[key] = parts[1]
+	}
+	sort.Strings(keys)
+
+	var check strings.Builder
+	for i, key := range keys {
+		if i > 0 {
+			check.WriteByte('\n')
+		}
+		check.WriteString(key)
+		check.WriteByte('=')
+		check.WriteString(kv[key])
+	}
+
+	mac := hmac.New(sha256.New, v.secret)
+	mac.Write([]byte(check.String()))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // sign computes the hash Telegram would have produced for these values.
