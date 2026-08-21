@@ -132,6 +132,17 @@ func (v *Verifier) Verify(initData string) (*LaunchData, error) {
 	// A byte-by-byte comparison would leak, through its timing, how much of a
 	// forged hash was correct — which is enough to construct the rest.
 	if !hmac.Equal([]byte(expected), []byte(provided)) {
+		// TEMPORARY diagnostic (2026-08-21): logging only field NAMES, byte
+		// lengths, and the two hex hashes — never a field VALUE, never the
+		// token. Safe to leave in logs. Remove once the real-mini-app
+		// signature mismatch is root-caused.
+		keys := make([]string, 0, len(values))
+		for k := range values {
+			keys = append(keys, fmt.Sprintf("%s(%d)", k, len(values.Get(k))))
+		}
+		sort.Strings(keys)
+		fmt.Printf("[telegram-verify-debug] initData_len=%d fields=%v expected_hash=%s received_hash=%s\n",
+			len(initData), keys, expected, provided)
 		return nil, ErrBadSignature
 	}
 
