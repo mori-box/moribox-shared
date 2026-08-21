@@ -89,7 +89,16 @@ type Verifier struct {
 
 // NewVerifier derives the signing key from the bot token.
 func NewVerifier(botToken string, maxAge time.Duration) (*Verifier, error) {
-	if strings.TrimSpace(botToken) == "" {
+	// A token sourced from an environment variable or a mounted secrets file
+	// can pick up a stray trailing newline or space along the way (a shell
+	// export, a docker-compose env interpolation quirk, an editor that always
+	// appends a final newline). getMe and other REST calls tolerate that kind
+	// of noise because HTTP libraries trim it; HMAC does not — one extra byte
+	// produces a completely different key and every real signature fails
+	// with what looks like a wrong-bot error. Trimming here is cheap and
+	// removes an entire class of "correct token, wrong signature" bugs.
+	botToken = strings.TrimSpace(botToken)
+	if botToken == "" {
 		return nil, ErrNotConfigured
 	}
 	if maxAge <= 0 {
@@ -132,21 +141,6 @@ func (v *Verifier) Verify(initData string) (*LaunchData, error) {
 	// A byte-by-byte comparison would leak, through its timing, how much of a
 	// forged hash was correct — which is enough to construct the rest.
 	if !hmac.Equal([]byte(expected), []byte(provided)) {
-		// TEMPORARY diagnostic (2026-08-21): logging only field NAMES, byte
-		// lengths, and the two hex hashes — never a field VALUE, never the
-		// token. Safe to leave in logs. Remove once the real-mini-app
-		// signature mismatch is root-caused.
-		keys := make([]string, 0, len(values))
-		for k := range values {
-			keys = append(keys, fmt.Sprintf("%s(%d)", k, len(values.Get(k))))
-		}
-		sort.Strings(keys)
-		// Also try signing over the RAW (still percent-encoded) field values,
-		// split by hand instead of through url.ParseQuery, to tell apart a
-		// decoding mismatch from a genuinely wrong secret.
-		rawAlt := v.signRaw(initData)
-		fmt.Printf("[telegram-verify-debug] initData_len=%d fields=%v expected_hash=%s received_hash=%s raw_alt_hash=%s raw_alt_matches=%v\n",
-			len(initData), keys, expected, provided, rawAlt, hmac.Equal([]byte(rawAlt), []byte(provided)))
 		return nil, ErrBadSignature
 	}
 
@@ -191,46 +185,6 @@ func (v *Verifier) Verify(initData string) (*LaunchData, error) {
 		data.ChatID, _ = strconv.ParseInt(raw, 10, 64)
 	}
 	return data, nil
-}
-
-// signRaw is a TEMPORARY diagnostic twin of sign that skips url.ParseQuery
-// decoding, splitting the raw initData string by hand and signing the still
-// percent-encoded values. If this matches when sign does not, the bug is in
-// how values get decoded, not in the token or the algorithm. Remove once the
-// real mismatch is root-caused.
-func (v *Verifier) signRaw(initData string) string {
-	pairs := strings.Split(initData, "&")
-	kv := make(map[string]string, len(pairs))
-	keys := make([]string, 0, len(pairs))
-	for _, p := range pairs {
-		parts := strings.SplitN(p, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := parts[0]
-		if key == "hash" || key == "signature" {
-			continue
-		}
-		if _, exists := kv[key]; !exists {
-			keys = append(keys, key)
-		}
-		kv[key] = parts[1]
-	}
-	sort.Strings(keys)
-
-	var check strings.Builder
-	for i, key := range keys {
-		if i > 0 {
-			check.WriteByte('\n')
-		}
-		check.WriteString(key)
-		check.WriteByte('=')
-		check.WriteString(kv[key])
-	}
-
-	mac := hmac.New(sha256.New, v.secret)
-	mac.Write([]byte(check.String()))
-	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // sign computes the hash Telegram would have produced for these values.
