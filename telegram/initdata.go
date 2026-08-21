@@ -187,8 +187,9 @@ func (v *Verifier) Verify(initData string) (*LaunchData, error) {
 			h := hex.EncodeToString(mac.Sum(nil))
 			matches[name] = hmac.Equal([]byte(h), []byte(provided))
 		}
-		fmt.Printf("[telegram-verify-debug-2] initData_len=%d token_len=%d token_fp=%s expected_hash=%s received_hash=%s raw_alt_hash=%s raw_alt_matches=%v candidate_matches=%v\n",
-			len(initData), v.tokenLen, v.tokenFingerprint, expected, provided, rawAlt, hmac.Equal([]byte(rawAlt), []byte(provided)), matches)
+		fmt.Printf("[telegram-verify-debug-2] initData_len=%d token_len=%d token_fp=%s expected_hash=%s(len=%d) received_hash=%s(len=%d) raw_alt_hash=%s raw_alt_matches=%v candidate_matches=%v case_insensitive_match=%v auth_date=%s query_id_len=%d\n",
+			len(initData), v.tokenLen, v.tokenFingerprint, expected, len(expected), provided, len(provided), rawAlt, hmac.Equal([]byte(rawAlt), []byte(provided)), matches,
+			strings.EqualFold(expected, provided), values.Get("auth_date"), len(values.Get("query_id")))
 		return nil, ErrBadSignature
 	}
 
