@@ -168,34 +168,19 @@ func (v *Verifier) Verify(initData string) (*LaunchData, error) {
 	// A byte-by-byte comparison would leak, through its timing, how much of a
 	// forged hash was correct — which is enough to construct the rest.
 	if !hmac.Equal([]byte(expected), []byte(provided)) {
-		// TEMPORARY diagnostic (2026-08-21, round 2): the TrimSpace fix did
-		// not resolve the real failures, so logging again — this time also
-		// the token length/fingerprint the secret was actually derived from,
-		// to confirm which token is in play. Never the token or any field
-		// value. Remove once root-caused.
-		rawAlt := v.signRaw(initData)
-		// Try alternative key-derivation directions against the SAME check
-		// string, in case the HMAC key direction (which input is the "key"
-		// vs the "message") is the actual bug rather than anything about
-		// field decoding. None of this prints a field value, the token, or
-		// any PII — only which variant (if any) matches.
-		matches := map[string]bool{}
-		cs := checkString(values)
-		for name, secret := range v.candidateSecrets {
-			mac := hmac.New(sha256.New, secret)
-			mac.Write([]byte(cs))
-			h := hex.EncodeToString(mac.Sum(nil))
-			matches[name] = hmac.Equal([]byte(h), []byte(provided))
-		}
-		fmt.Printf("[telegram-verify-debug-2] initData_len=%d token_len=%d token_fp=%s expected_hash=%s(len=%d) received_hash=%s(len=%d) raw_alt_hash=%s raw_alt_matches=%v candidate_matches=%v case_insensitive_match=%v auth_date=%s query_id_len=%d\n",
-			len(initData), v.tokenLen, v.tokenFingerprint, expected, len(expected), provided, len(provided), rawAlt, hmac.Equal([]byte(rawAlt), []byte(provided)), matches,
-			strings.EqualFold(expected, provided), values.Get("auth_date"), len(values.Get("query_id")))
-		// TEMPORARY, explicitly authorized by the account holder for exactly
-		// one round of debugging (2026-08-21/22): the raw launch parameters,
-		// to this server's log only. Contains PII (name, username, Telegram
-		// ID) — remove this line immediately after the round that captures
-		// it, do not leave it in any release.
-		fmt.Printf("[telegram-verify-debug-2-raw] initData=%q\n", initData)
+		// TEMPORARY diagnostic, round 5: the raw capture (now removed) showed
+		// a structurally normal payload — auth_date, query_id, user, plus a
+		// signature field — with nothing about decoding or the token
+		// explaining the mismatch. Next candidate: the check string might be
+		// meant to include `signature` (only `hash` itself excluded), not
+		// exclude it. Zero PII: just whether this alternate check string,
+		// signed with the correct secret, matches.
+		withSig := checkStringWithSignature(values)
+		mac := hmac.New(sha256.New, v.secret)
+		mac.Write([]byte(withSig))
+		withSigHash := hex.EncodeToString(mac.Sum(nil))
+		fmt.Printf("[telegram-verify-debug-3] expected_hash=%s received_hash=%s with_signature_hash=%s with_signature_matches=%v\n",
+			expected, provided, withSigHash, hmac.Equal([]byte(withSigHash), []byte(provided)))
 		return nil, ErrBadSignature
 	}
 
@@ -242,44 +227,6 @@ func (v *Verifier) Verify(initData string) (*LaunchData, error) {
 	return data, nil
 }
 
-// signRaw is a TEMPORARY diagnostic twin of sign that skips url.ParseQuery
-// decoding, splitting the raw initData string by hand and signing the still
-// percent-encoded values. Remove once the real mismatch is root-caused.
-func (v *Verifier) signRaw(initData string) string {
-	pairs := strings.Split(initData, "&")
-	kv := make(map[string]string, len(pairs))
-	keys := make([]string, 0, len(pairs))
-	for _, p := range pairs {
-		parts := strings.SplitN(p, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := parts[0]
-		if key == "hash" || key == "signature" {
-			continue
-		}
-		if _, exists := kv[key]; !exists {
-			keys = append(keys, key)
-		}
-		kv[key] = parts[1]
-	}
-	sort.Strings(keys)
-
-	var check strings.Builder
-	for i, key := range keys {
-		if i > 0 {
-			check.WriteByte('\n')
-		}
-		check.WriteString(key)
-		check.WriteByte('=')
-		check.WriteString(kv[key])
-	}
-
-	mac := hmac.New(sha256.New, v.secret)
-	mac.Write([]byte(check.String()))
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
 // sign computes the hash Telegram would have produced for these values.
 //
 // The check string is every field except the hash, sorted by key, rendered as
@@ -299,6 +246,31 @@ func checkString(values url.Values) string {
 	keys := make([]string, 0, len(values))
 	for key := range values {
 		if key == "hash" || key == "signature" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var check strings.Builder
+	for i, key := range keys {
+		if i > 0 {
+			check.WriteByte('\n')
+		}
+		check.WriteString(key)
+		check.WriteByte('=')
+		check.WriteString(values.Get(key))
+	}
+	return check.String()
+}
+
+// checkStringWithSignature is a TEMPORARY diagnostic twin of checkString that
+// includes `signature` in the check string (only `hash` itself excluded).
+// Remove once the real mismatch is root-caused.
+func checkStringWithSignature(values url.Values) string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		if key == "hash" {
 			continue
 		}
 		keys = append(keys, key)
