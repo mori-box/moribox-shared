@@ -79,20 +79,7 @@ type Verifier struct {
 	// itself is not retained: nothing here needs it again, and not holding it
 	// means it cannot be read out of this struct.
 	secret []byte
-	// tokenLen and tokenFingerprint are TEMPORARY diagnostic fields — never
-	// the token itself, just its length and a one-way SHA256 fingerprint, so
-	// two verifiers can be compared for using the identical token without
-	// either ever printing anything secret. Remove once the real mismatch is
-	// root-caused.
-	tokenLen         int
-	tokenFingerprint string
-	// candidateSecrets holds a few alternative HMAC keys derived from the
-	// same token by plausible-but-wrong recipes (reversed HMAC direction,
-	// bare SHA256). TEMPORARY, for cross-checking which recipe Telegram
-	// actually used without ever retaining or printing the raw token. Remove
-	// once the real mismatch is root-caused.
-	candidateSecrets map[string][]byte
-	maxAge           time.Duration
+	maxAge time.Duration
 	// clockSkew tolerates a client whose clock runs slightly ahead. Telegram
 	// stamps auth_date on its own servers, so the tolerance covers the gap
 	// between their clock and ours, not a user's.
@@ -125,25 +112,11 @@ func NewVerifier(botToken string, maxAge time.Duration) (*Verifier, error) {
 	mac := hmac.New(sha256.New, []byte("WebAppData"))
 	mac.Write([]byte(botToken))
 
-	fp := sha256.Sum256([]byte(botToken))
-
-	// TEMPORARY candidate secrets for cross-checking (see field doc above).
-	reversed := hmac.New(sha256.New, []byte(botToken))
-	reversed.Write([]byte("WebAppData"))
-	bare := sha256.Sum256([]byte(botToken))
-	candidates := map[string][]byte{
-		"reversed_hmac_direction": reversed.Sum(nil),
-		"bare_sha256_of_token":    bare[:],
-	}
-
 	return &Verifier{
-		secret:           mac.Sum(nil),
-		tokenLen:         len(botToken),
-		tokenFingerprint: hex.EncodeToString(fp[:8]),
-		candidateSecrets: candidates,
-		maxAge:           maxAge,
-		clockSkew:        30 * time.Second,
-		now:              time.Now,
+		secret:    mac.Sum(nil),
+		maxAge:    maxAge,
+		clockSkew: 30 * time.Second,
+		now:       time.Now,
 	}, nil
 }
 
@@ -168,19 +141,6 @@ func (v *Verifier) Verify(initData string) (*LaunchData, error) {
 	// A byte-by-byte comparison would leak, through its timing, how much of a
 	// forged hash was correct — which is enough to construct the rest.
 	if !hmac.Equal([]byte(expected), []byte(provided)) {
-		// TEMPORARY diagnostic, round 5: the raw capture (now removed) showed
-		// a structurally normal payload — auth_date, query_id, user, plus a
-		// signature field — with nothing about decoding or the token
-		// explaining the mismatch. Next candidate: the check string might be
-		// meant to include `signature` (only `hash` itself excluded), not
-		// exclude it. Zero PII: just whether this alternate check string,
-		// signed with the correct secret, matches.
-		withSig := checkStringWithSignature(values)
-		mac := hmac.New(sha256.New, v.secret)
-		mac.Write([]byte(withSig))
-		withSigHash := hex.EncodeToString(mac.Sum(nil))
-		fmt.Printf("[telegram-verify-debug-3] expected_hash=%s received_hash=%s with_signature_hash=%s with_signature_matches=%v\n",
-			expected, provided, withSigHash, hmac.Equal([]byte(withSigHash), []byte(provided)))
 		return nil, ErrBadSignature
 	}
 
@@ -229,45 +189,19 @@ func (v *Verifier) Verify(initData string) (*LaunchData, error) {
 
 // sign computes the hash Telegram would have produced for these values.
 //
-// The check string is every field except the hash, sorted by key, rendered as
-// key=value and joined by newlines. `signature` is excluded as well: it belongs
-// to Telegram's separate Ed25519 scheme for third parties and is not part of
-// the HMAC input, so including it would make every signed request fail on the
-// clients that send it.
+// The check string is every field except hash itself, sorted by key,
+// rendered as key=value and joined by newlines.
+//
+// `signature` IS included, despite belonging to Telegram's separate Ed25519
+// scheme for third parties: confirmed live against real launch parameters
+// (2026-08-22) that Telegram's own HMAC check string covers it too — the
+// widely-copied assumption that `hash` is computed only over auth_date,
+// query_id, chat_instance, chat_type, start_param and user, with `signature`
+// excluded alongside `hash`, is wrong for the current client. Excluding it
+// made every real signature fail while self-signed test tokens (which never
+// carry a `signature` field to begin with) kept passing, hiding the bug
+// until it hit a real Telegram client.
 func (v *Verifier) sign(values url.Values) string {
-	mac := hmac.New(sha256.New, v.secret)
-	mac.Write([]byte(checkString(values)))
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
-// checkString builds the check string: every field except hash and
-// signature, sorted by key, rendered as key=value and joined by newlines.
-func checkString(values url.Values) string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		if key == "hash" || key == "signature" {
-			continue
-		}
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	var check strings.Builder
-	for i, key := range keys {
-		if i > 0 {
-			check.WriteByte('\n')
-		}
-		check.WriteString(key)
-		check.WriteByte('=')
-		check.WriteString(values.Get(key))
-	}
-	return check.String()
-}
-
-// checkStringWithSignature is a TEMPORARY diagnostic twin of checkString that
-// includes `signature` in the check string (only `hash` itself excluded).
-// Remove once the real mismatch is root-caused.
-func checkStringWithSignature(values url.Values) string {
 	keys := make([]string, 0, len(values))
 	for key := range values {
 		if key == "hash" {
@@ -286,5 +220,8 @@ func checkStringWithSignature(values url.Values) string {
 		check.WriteByte('=')
 		check.WriteString(values.Get(key))
 	}
-	return check.String()
+
+	mac := hmac.New(sha256.New, v.secret)
+	mac.Write([]byte(check.String()))
+	return hex.EncodeToString(mac.Sum(nil))
 }

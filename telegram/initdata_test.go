@@ -19,6 +19,12 @@ const botToken = "8899816630:AAtest-token-for-unit-tests-only-not-real"
 
 // sign builds launch parameters the way Telegram does, so the test exercises the
 // real check rather than the implementation's own idea of a signature.
+//
+// fields may include "signature": confirmed live against real launch
+// parameters (2026-08-22) that Telegram's HMAC check string covers every
+// field except hash itself, signature included — so this helper signs
+// whatever is in fields exactly like production does, rather than special
+// casing it out.
 func sign(t *testing.T, token string, fields map[string]string) string {
 	t.Helper()
 
@@ -148,20 +154,37 @@ func TestVerifyRefusesParametersWithNoUser(t *testing.T) {
 	require.ErrorIs(t, err, telegram.ErrNoUser)
 }
 
-// TestSignatureFieldIsNotPartOfTheHMAC guards a real interoperability trap:
-// newer clients add an Ed25519 `signature` field, which is not part of the HMAC
-// input. Including it would refuse every login from those clients.
-func TestSignatureFieldIsNotPartOfTheHMAC(t *testing.T) {
+// TestSignatureFieldIsPartOfTheHMAC guards against reintroducing a real bug
+// found live on 2026-08-22: modern clients add an Ed25519 `signature` field
+// alongside `hash`, and it turns out Telegram's own HMAC check string covers
+// it too. Excluding it (the widely-copied assumption, matching most public
+// reference snippets) makes the computed hash never match a real client's,
+// while a self-signed test token that never carries a `signature` field
+// keeps passing — which is exactly how this stayed invisible until it hit
+// production. A `signature` present when the parameters were verified is
+// therefore load bearing: appending one after signing must invalidate the
+// hash, the same as tampering with any other field would.
+func TestSignatureFieldIsPartOfTheHMAC(t *testing.T) {
 	v, err := telegram.NewVerifier(botToken, time.Hour)
 	require.NoError(t, err)
 
+	// Signed without a signature field, then one is appended afterward —
+	// exactly the shape of the original bug report.
 	signed := sign(t, botToken, freshFields(time.Now()))
 	values, err := url.ParseQuery(signed)
 	require.NoError(t, err)
 	values.Set("signature", "3A0dyvfsRAkBQqbAcCkQ0mSGtDrsyfPa_i6xJlnCPpM")
 
-	data, err := v.Verify(values.Encode())
-	require.NoError(t, err, "an Ed25519 signature field must not break the HMAC check")
+	_, err = v.Verify(values.Encode())
+	require.ErrorIs(t, err, telegram.ErrBadSignature,
+		"a signature field added after hashing must invalidate the hash, the same as any other field")
+
+	// Signed as one shape from the start — a genuine client sends both hash
+	// and signature together — must verify cleanly.
+	fields := freshFields(time.Now())
+	fields["signature"] = "3A0dyvfsRAkBQqbAcCkQ0mSGtDrsyfPa_i6xJlnCPpM"
+	data, err := v.Verify(sign(t, botToken, fields))
+	require.NoError(t, err)
 	require.EqualValues(t, 42, data.User.ID)
 }
 
